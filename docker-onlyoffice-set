@@ -1,0 +1,103 @@
+#!/bin/bash
+
+while true
+do
+
+while [ $(docker exec onlyoffice supervisorctl status | grep -c RUNNING) -ne 3 ]; do
+echo "OnlyOffice nie jest jeszcze gotowy. Czekam..."
+sleep 10
+done
+
+docker cp onlyoffice://etc/onlyoffice/documentserver/local.json /tmp/onlyofficestatus.json
+docker cp onlyoffice://etc/onlyoffice/documentserver/nginx/ds.conf /tmp/onlyofficenginx.conf
+
+if [ $(grep -c "1_Only*" /tmp/onlyofficestatus.json) -eq 0 ]; then
+docker exec onlyoffice cp /etc/onlyoffice/documentserver/local.json /etc/onlyoffice/documentserver/local.json.old
+echo "Przeładowuję konfigurację OnlyOffice..."
+cat << 'EOF' > /tmp/onlyoffice-local.json
+{
+  "services": {
+    "CoAuthoring": {
+      "sql": {
+        "type": "postgres",
+        "dbHost": "localhost",
+        "dbPort": "5432",
+        "dbName": "onlyoffice",
+        "dbUser": "onlyoffice",
+        "dbPass": "onlyoffice"
+      },
+      "token": {
+        "enable": {
+          "request": {
+            "inbox": true,
+            "outbox": true
+          },
+          "browser": true
+        },
+        "inbox": {
+          "header": "AuthorizationJWT",
+          "inbody": false
+        },
+        "outbox": {
+          "header": "AuthorizationJWT",
+          "inbody": false
+        }
+      },
+      "secret": {
+        "inbox": {
+          "string": "password"
+        },
+        "outbox": {
+          "string": "password"
+        },
+        "session": {
+          "string": "password"
+        }
+      }
+    }
+  },
+  "rabbitmq": {
+    "url": "amqp://guest:guest@localhost"
+  },
+  "storage": {
+    "fs": {
+      "secretString": "verysecretstring"
+    }
+  }
+}
+EOF
+
+docker cp /tmp/onlyoffice-local.json onlyoffice://etc/onlyoffice/documentserver/local.json
+docker exec onlyoffice supervisorctl restart all
+docker exec onlyoffice supervisorctl stop ds:example
+rm /tmp/onlyoffice-local.json
+echo "OnlyOffice OK"
+
+fi
+
+if [ $(grep -c "verysecretstring" /tmp/onlyofficenginx.conf) -eq 0 ]; then
+docker exec onlyoffice cp /etc/onlyoffice/documentserver/nginx/ds.conf /etc/onlyoffice/documentserver/nginx/ds.conf.old
+echo "Przeładowuję konfigurację NGINX..."
+cat << 'EOF' > /tmp/onlyofficeds.conf
+include /etc/nginx/includes/http-common.conf;
+server {
+  listen 0.0.0.0:80;
+  listen [::]:80 default_server;
+  server_tokens off;
+
+  set $secure_link_secret verysecretstring;
+  include /etc/nginx/includes/ds-*.conf;
+}
+EOF
+
+docker cp /tmp/onlyofficeds.conf onlyoffice://etc/onlyoffice/documentserver/nginx/ds.conf
+docker exec onlyoffice service nginx restart
+rm /tmp/onlyofficeds.conf
+echo "NGINX OK"
+fi
+
+rm /tmp/onlyofficestatus.json
+rm /tmp/onlyofficenginx.conf
+
+sleep 15
+done
